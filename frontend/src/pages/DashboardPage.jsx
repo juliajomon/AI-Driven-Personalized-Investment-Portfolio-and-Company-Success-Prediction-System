@@ -7,8 +7,8 @@ import { optimizePortfolio } from '../api/apiService';
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF', '#FF4560', '#775DD0'];
 
 const DashboardPage = () => {
-  const [amount, setAmount] = useState(50000); // Default investment amount
-  const [targetReturn, setTargetReturn] = useState(20); // Default target return
+  const [amount, setAmount] = useState(); // Default investment amount
+  const [targetReturn, setTargetReturn] = useState(); // Default target return
   const [portfolioData, setPortfolioData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('Enter your goals and optimize the portfolio!');
@@ -48,8 +48,8 @@ const DashboardPage = () => {
       <button type="button" onClick={logout} className="logout-button">
         Logout
       </button>
-      <button type="button" className="profile-button" onClick={() => navigate('/history')}>
-        📊
+      <button type="button" className="profile-button" onClick={() => navigate('/chatbot')}>
+        🤖
       </button>
 
       <div className="dashboard-container">
@@ -64,6 +64,7 @@ const DashboardPage = () => {
           </button>
           <button type="button" className="dashboard-button" onClick={() => navigate('/history')}>
             Optimization History
+
           </button>
         </div>
 

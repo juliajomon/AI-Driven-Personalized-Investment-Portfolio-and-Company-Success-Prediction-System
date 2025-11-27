@@ -9,6 +9,7 @@ import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignUpPage';
 import DashboardPage from './pages/DashboardPage'; // The core optimization view
+import ChatbotPage from './pages/ChatbotPage';
 import HistoryPage from './pages/HistoryPage';
 
 // Simple authentication guard component
@@ -29,8 +30,8 @@ const App = () => {
 
         {/* PROTECTED ROUTES (Requires Login) */}
         <Route path="/dashboard" element={<AuthGuard><DashboardPage /></AuthGuard>} />
+        <Route path="/chatbot" element={<AuthGuard><ChatbotPage /></AuthGuard>} />
         <Route path="/history" element={<AuthGuard><HistoryPage /></AuthGuard>} />
-        
         {/* FALLBACK */}
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

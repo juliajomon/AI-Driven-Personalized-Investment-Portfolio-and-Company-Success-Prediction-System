@@ -260,6 +260,21 @@ def safe_loc(df, key, default=pd.Series(dtype='float64')):
     try: return df.loc[key] if key in df.index else default
     except: return default
 
+
+def regularize_cov(matrix, eps=1e-8):
+    """
+    Ensure the covariance matrix is positive definite by adding
+    a small multiple of the identity if needed.
+    """
+    mat = np.array(matrix, dtype=float)
+    if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
+        raise ValueError("Covariance matrix must be square.")
+
+    min_eig = np.min(np.real(np.linalg.eigvals(mat)))
+    if min_eig < eps:
+        mat += np.eye(mat.shape[0]) * (eps - min_eig + 1e-8)
+    return mat
+
 def fetch_hybrid_data(row):
     ticker = row['Ticker']
     try:
@@ -435,23 +450,25 @@ def optimize_portfolio():
     try:
         data = request.json or {}
         investment_amount = float(data.get('amount', 100000))
-        target_return_pct = float(data.get('target_return', 20)) / 100.0
+        target_return_pct = float(data.get('target_return', 20)) / 100.0 
         
         if df_preds is None: return jsonify({"error": "Server data missing/loading."}), 500
 
+        # Filter Candidates (Limit to top 15 Strong Buys)
         candidates = df_preds[df_preds['AI_Success_Probability'] > 80].copy()
         candidates = candidates.sort_values(by='AI_Success_Probability', ascending=False).head(15)
         tickers = candidates['Ticker'].tolist()
         
         if len(tickers) < 2: return jsonify({"error": "Not enough strong buy stocks."}), 400
 
+        # Fetch Closing Prices
         prices = yf.download(tickers, period="1y", progress=False, threads=False)['Close']
         prices = prices.dropna(axis=1, thresh=int(len(prices)*0.9)).fillna(method='ffill').fillna(method='bfill')
         valid_tickers = prices.columns.tolist()
 
         returns = prices.pct_change().dropna()
         mu = returns.mean().values * 252
-        Sigma = returns.cov().values * 252
+        Sigma = np.cov(returns.values, rowvar=False) * 252
         n = len(valid_tickers)
 
         if np.isnan(Sigma).any(): return jsonify({"error": "Unstable market data."}), 500
@@ -461,56 +478,53 @@ def optimize_portfolio():
         risk_primary = cp.quad_form(w_primary, Sigma)
         
         primary_constraints = [
-            cp.sum(w_primary) == 1, w_primary >= 0, w_primary <= 0.50, 
+            cp.sum(w_primary) == 1, w_primary >= 0, w_primary <= 0.30, 
             (mu @ w_primary) >= target_return_pct
         ]
-        
         prob_primary = cp.Problem(cp.Minimize(risk_primary), primary_constraints)
         prob_primary.solve(solver=cp.OSQP)
 
+        
         # --- 2. FALLBACK CHECK & GMVP SOLUTION ---
+        is_gmvp_fallback = False
         if w_primary.value is None or prob_primary.status not in ["optimal", "optimal_inaccurate"]:
             
-            # Solve for the Global Minimum Volatility Portfolio (GMVP)
+            # If primary fails, solve for the Global Minimum Volatility Portfolio (GMVP)
             w_gmvp = cp.Variable(n)
-            risk_gmvp = cp.quad_form(w_gmvp, Sigma)
-            
             gmvp_constraints = [cp.sum(w_gmvp) == 1, w_gmvp >= 0, w_gmvp <= 0.30]
-            
-            prob_gmvp = cp.Problem(cp.Minimize(risk_gmvp), gmvp_constraints)
+            prob_gmvp = cp.Problem(cp.Minimize(cp.quad_form(w_gmvp, Sigma)), gmvp_constraints)
             prob_gmvp.solve(solver=cp.OSQP)
             
+            if w_gmvp.value is None: return jsonify({"error": "Optimization failed completely."}), 500
+            
             weights = w_gmvp.value
-            
-            if weights is None: return jsonify({"error": "Optimization failed completely."}), 500
-
-            # Calculate Fallback Metrics
-            final_exp_return = float(np.dot(weights, mu))
-            final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
-            final_sharpe = final_exp_return / final_risk
-
-            warning_message = f"WARNING: Target return of {target_return_pct:.1%} was too high. Portfolio optimized for MINIMUM RISK (GMVP)."
-            warning_level = "ADJUST"
-        
+            is_gmvp_fallback = True
         else:
-            # Primary optimization succeeded
             weights = w_primary.value
-            final_exp_return = float(np.dot(weights, mu))
-            final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
-            final_sharpe = final_exp_return / final_risk
-            
-            warning_message = f"Target achieved ({target_return_pct:.1%})."
-            warning_level = "SUCCESS"
 
+        # --- 3. CALCULATE FINAL METRICS ---
+        final_exp_return = float(np.dot(weights, mu))
+        final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
+        final_sharpe = final_exp_return / final_risk
 
-        # --- 3. CUSTOM LOGIC: HIGH RISK WARNING ---
-        # If Volatility is more than 60% of the Return (Sharpe < 1.66), we warn.
-        if final_exp_return > 0.05 and final_risk > (final_exp_return / 1.5):
+        # --- 4. DETERMINE FINAL STATUS AND ADVICE ---
+        
+        warning_level = "SUCCESS"
+        warning_message = f"Optimal solution found. Target achieved ({final_exp_return*100:.1f}%) with high efficiency (Sharpe: {final_sharpe:.2f})."
+        
+        # Check 1: Is the portfolio highly inefficient (Sharpe < 1.05)?
+        if final_exp_return > 0.05 and final_sharpe < 1.05:
             warning_level = "ADJUST"
-            warning_message = f"HIGH RISK WARNING: Volatility ({final_risk*100:.1f}%) is high for your return. Lower your target return to reduce risk and improve your Sharpe Ratio."
+            
+            if is_gmvp_fallback:
+                # FIX: If already at GMVP, tell user to INCREASE target
+                warning_message = f"HIGH RISK WARNING: Volatility ({final_risk*100:.1f}%) is high for your return. Sharpe Ratio ({final_sharpe:.2f}) is below the efficiency standard (1.25). Lower your target return to reduce risk."
+
+            else:
+                warning_message = f"WARNING: Portfolio is at minimum risk (GMVP). Sharpe ({final_sharpe:.2f}) is low. Increase your target return to improve efficiency."
+       
         
-        
-        # --- 4. FORMAT FINAL OUTPUT ---
+        # --- 5. FORMAT FINAL OUTPUT ---
         
         allocation = []
         for i, t in enumerate(valid_tickers):
@@ -539,9 +553,7 @@ def optimize_portfolio():
 
     except Exception as e:
         print(f"❌ Server Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-# ==========================================
+        return jsonify({"error": str(e)}), 500# ==========================================
 # 5. STARTUP (With Self-Healing)
 # ==========================================
 if __name__ == '__main__':
