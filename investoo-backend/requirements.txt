@@ -1,0 +1,11 @@
+   Flask
+   flask-cors
+   APScheduler
+   scikit-learn
+   xgboost
+   pandas
+   numpy
+   joblib
+   cvxpy
+   yfinance
+   requests

@@ -2,11 +2,12 @@
 
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import './App.css';
 
 // Import all page components
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
-import SignupPage from './pages/SignupPage';
+import SignupPage from './pages/SignUpPage';
 import DashboardPage from './pages/DashboardPage'; // The core optimization view
 import HistoryPage from './pages/HistoryPage';
 
