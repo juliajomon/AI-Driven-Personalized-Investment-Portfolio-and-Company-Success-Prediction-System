@@ -422,10 +422,6 @@ def perform_full_update(force=False):
     except Exception as e:
         print(f"❌ Update Failed: {e}")
 
-# ==========================================
-# 2. FLASK ROUTES
-# ==========================================
-
 @app.route('/', methods=['GET'])
 def home(): return jsonify({"status": "online"})
 
@@ -447,7 +443,7 @@ def optimize_portfolio():
         candidates = candidates.sort_values(by='AI_Success_Probability', ascending=False).head(15)
         tickers = candidates['Ticker'].tolist()
         
-        if len(tickers) < 2: return jsonify({"error": "Not enough stocks."}), 400
+        if len(tickers) < 2: return jsonify({"error": "Not enough strong buy stocks."}), 400
 
         prices = yf.download(tickers, period="1y", progress=False, threads=False)['Close']
         prices = prices.dropna(axis=1, thresh=int(len(prices)*0.9)).fillna(method='ffill').fillna(method='bfill')
@@ -460,23 +456,70 @@ def optimize_portfolio():
 
         if np.isnan(Sigma).any(): return jsonify({"error": "Unstable market data."}), 500
 
-        w = cp.Variable(n)
-        risk = cp.quad_form(w, Sigma)
-        objective = cp.Minimize(risk)
-        constraints = [cp.sum(w) == 1, w >= 0, w <= 0.30, (mu @ w) >= target_return_pct]
+        # --- 1. ATTEMPT PRIMARY (Target Return) OPTIMIZATION ---
+        w_primary = cp.Variable(n)
+        risk_primary = cp.quad_form(w_primary, Sigma)
         
-        prob = cp.Problem(objective, constraints)
-        try: prob.solve(solver=cp.OSQP)
-        except: prob.solve()
+        primary_constraints = [
+            cp.sum(w_primary) == 1, w_primary >= 0, w_primary <= 0.50, 
+            (mu @ w_primary) >= target_return_pct
+        ]
+        
+        prob_primary = cp.Problem(cp.Minimize(risk_primary), primary_constraints)
+        prob_primary.solve(solver=cp.OSQP)
 
-        if w.value is None: return jsonify({"error": "Target return too high."}), 400
+        # --- 2. FALLBACK CHECK & GMVP SOLUTION ---
+        if w_primary.value is None or prob_primary.status not in ["optimal", "optimal_inaccurate"]:
+            
+            # Solve for the Global Minimum Volatility Portfolio (GMVP)
+            w_gmvp = cp.Variable(n)
+            risk_gmvp = cp.quad_form(w_gmvp, Sigma)
+            
+            gmvp_constraints = [cp.sum(w_gmvp) == 1, w_gmvp >= 0, w_gmvp <= 0.30]
+            
+            prob_gmvp = cp.Problem(cp.Minimize(risk_gmvp), gmvp_constraints)
+            prob_gmvp.solve(solver=cp.OSQP)
+            
+            weights = w_gmvp.value
+            
+            if weights is None: return jsonify({"error": "Optimization failed completely."}), 500
 
+            # Calculate Fallback Metrics
+            final_exp_return = float(np.dot(weights, mu))
+            final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
+            final_sharpe = final_exp_return / final_risk
+
+            warning_message = f"WARNING: Target return of {target_return_pct:.1%} was too high. Portfolio optimized for MINIMUM RISK (GMVP)."
+            warning_level = "ADJUST"
+        
+        else:
+            # Primary optimization succeeded
+            weights = w_primary.value
+            final_exp_return = float(np.dot(weights, mu))
+            final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
+            final_sharpe = final_exp_return / final_risk
+            
+            warning_message = f"Target achieved ({target_return_pct:.1%})."
+            warning_level = "SUCCESS"
+
+
+        # --- 3. CUSTOM LOGIC: HIGH RISK WARNING ---
+        # If Volatility is more than 60% of the Return (Sharpe < 1.66), we warn.
+        if final_exp_return > 0.05 and final_risk > (final_exp_return / 1.5):
+            warning_level = "ADJUST"
+            warning_message = f"HIGH RISK WARNING: Volatility ({final_risk*100:.1f}%) is high for your return. Lower your target return to reduce risk and improve your Sharpe Ratio."
+        
+        
+        # --- 4. FORMAT FINAL OUTPUT ---
+        
         allocation = []
         for i, t in enumerate(valid_tickers):
-            weight = w.value[i]
+            weight = weights[i]
             if weight > 0.01:
-                name = candidates[candidates['Ticker'] == t]['Name'].values[0]
-                sector = candidates[candidates['Ticker'] == t]['Sector'].values[0]
+                meta = candidates[candidates['Ticker'] == t]
+                name = meta['Name'].values[0] if not meta.empty else t
+                sector = meta['Sector'].values[0] if not meta.empty else "Unknown"
+                
                 allocation.append({
                     "ticker": t, "name": name, "sector": sector,
                     "weight": round(weight, 4),
@@ -484,19 +527,22 @@ def optimize_portfolio():
                 })
         
         return jsonify({
-            "status": "success",
+            "status": warning_level,
+            "message": warning_message,
             "portfolio": sorted(allocation, key=lambda x: x['weight'], reverse=True),
             "metrics": {
-                "expected_return": round(float(np.dot(w.value, mu)) * 100, 2),
-                "risk": round(float(np.sqrt(np.dot(w.value.T, np.dot(Sigma, w.value)))) * 100, 2)
+                "expected_return": round(final_exp_return * 100, 2),
+                "estimated_risk": round(final_risk * 100, 2),
+                "sharpe_ratio": round(final_sharpe, 2)
             }
         })
 
     except Exception as e:
+        print(f"❌ Server Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # ==========================================
-# 3. STARTUP LOGIC (SELF-HEALING)
+# 5. STARTUP (With Self-Healing)
 # ==========================================
 if __name__ == '__main__':
     print("🚀 Server Starting...")
@@ -508,18 +554,20 @@ if __name__ == '__main__':
     atexit.register(lambda: scheduler.shutdown())
 
     # 2. CHECK ARTIFACTS
-    # We load first. If load fails (bad version), we force update.
     try:
-        if os.path.exists(MODEL_FILE) and os.path.exists(PREDICTIONS_FILE):
-            print("✅ Found data files. Loading...")
+        if os.path.exists(PREDICTIONS_FILE) and os.path.exists(MODEL_FILE):
+            print("✅ Found existing data. Loading...")
             model = joblib.load(MODEL_FILE)
             df_preds = pd.read_csv(PREDICTIONS_FILE)
             print(f"   - Loaded {len(df_preds)} stocks.")
         else:
-            raise FileNotFoundError("Files missing")
+            # If files are missing, run the update immediately
+            print("\n⚠️  Data files missing. Running INITIAL SETUP (This takes ~2 mins)...")
+            perform_full_update(force=True)
+            
     except Exception as e:
-        print(f"\n⚠️  Artifact Error ({e}). Forcing REBUILD (Ignore Schedule)...")
-        # FORCE UPDATE IGNORES MONDAY 8AM RULE FOR INITIAL SETUP
+        # If loading fails (version mismatch/corruption), force update
+        print(f"\n❌ Critical Artifact Error ({e}). Running REBUILD...")
         perform_full_update(force=True)
 
     # 3. START FLASK
