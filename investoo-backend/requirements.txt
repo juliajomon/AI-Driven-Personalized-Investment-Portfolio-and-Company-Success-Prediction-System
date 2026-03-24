@@ -9,3 +9,4 @@
    cvxpy
    yfinance
    requests
+   rapidfuzz

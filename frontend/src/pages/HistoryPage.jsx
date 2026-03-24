@@ -1,44 +1,35 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { getSearchHistory } from '../api/apiService';
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF', '#FF4560', '#775DD0'];
 
-// Mock data for historical portfolios
-const historicalData = [
-  {
-    id: 1,
-    date: '2025-11-27',
-    target: 22.0,
-    achieved: 22.0,
-    volatility: 15.52,
-    status: 'HIGH_RISK',
-    portfolio: [
-      { name: 'RELIANCE', value: 15000, sector: 'Energy' },
-      { name: 'TCS', value: 12000, sector: 'IT' },
-      { name: 'HDFC Bank', value: 10000, sector: 'Banking' },
-      { name: 'Infosys', value: 8000, sector: 'IT' },
-      { name: 'ICICI Bank', value: 5000, sector: 'Banking' }
-    ]
-  },
-  {
-    id: 2,
-    date: '2025-11-20',
-    target: 18.0,
-    achieved: 18.0,
-    volatility: 10.05,
-    status: 'SUCCESS',
-    portfolio: [
-      { name: 'HDFC Bank', value: 18000, sector: 'Banking' },
-      { name: 'TCS', value: 15000, sector: 'IT' },
-      { name: 'Infosys', value: 10000, sector: 'IT' },
-      { name: 'HUL', value: 7000, sector: 'FMCG' }
-    ]
-  }
-];
-
 const HistoryPage = () => {
   const navigate = useNavigate();
+  const [historicalData, setHistoricalData] = useState([]);
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const userId = localStorage.getItem('userId') || 1;
+        const data = await getSearchHistory(userId);
+        setHistoricalData(
+          data.map((item) => ({
+            id: item.id,
+            target: item.expected_return,
+            achieved: item.expected_return,
+            volatility: item.risk_rate,
+            status: 'SUCCESS',
+            portfolio: item.portfolio || [],
+          }))
+        );
+      } catch {
+        setHistoricalData([]);
+      }
+    };
+    fetchHistory();
+  }, []);
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -67,7 +58,7 @@ const HistoryPage = () => {
       <header className="mb-8">
         <button 
           onClick={() => navigate('/dashboard')} 
-          className="text-blue-600 hover:text-blue-800 flex items-center mb-4"
+          className="text-blue-600 hover:text-blue-800 flex items-center mb-4" 
         >
           ← Back to Dashboard
         </button>
@@ -80,7 +71,7 @@ const HistoryPage = () => {
           <div key={item.id} className="bg-white p-4 md:p-6 rounded-lg shadow-lg">
             <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-4">
               <div>
-                <h3 className="text-lg font-bold">Optimization Run: {item.date} {item.id === 1 && '(Latest)'}</h3>
+                <h3 className="text-lg font-bold">Optimization Run: {item.id} {item.id === 1 && '(Latest)'}</h3>
                 <p className="text-sm text-gray-600">
                   Target: {item.target}% | Achieved: {item.achieved}% | Volatility: {item.volatility}%
                 </p>
@@ -124,8 +115,7 @@ const HistoryPage = () => {
               </div>
               
               <div>
-                <h4 className="font-semibold mb-2">Portfolio Details</h4>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto" align="center">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
@@ -161,12 +151,7 @@ const HistoryPage = () => {
           </div>
         ))}
         
-        <div className="bg-white p-4 rounded-lg shadow">
-          <p className="text-sm text-gray-500">
-            Note: This is demo data. To save history permanently, you would need to set up a database 
-            (MySQL/Postgres) and corresponding backend endpoints.
-          </p>
-        </div>
+        
       </div>
     </div>
   );

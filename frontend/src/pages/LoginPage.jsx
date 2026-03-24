@@ -1,10 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../styles/auth.css';
+import { loginUser } from '../api/apiService';
 
-// Note: API_URL and axios are kept as comments for future implementation
-// import axios from 'axios';
-// const API_URL = 'http://127.0.0.1:5000/api/auth/login'; // Placeholder Flask Auth Endpoint
 
 const LoginPage = () => {
   const [email, setEmail] = useState('');
@@ -16,14 +14,13 @@ const LoginPage = () => {
     e.preventDefault();
     setMessage('');
     try {
-      // In a real app, this sends credentials and gets a JWT token back
-      // const response = await axios.post(API_URL, { email, password });
-
-      // MOCK SUCCESS for Project Demo
-      localStorage.setItem('userToken', 'fake-jwt-token-for-demo');
-      navigate('/dashboard'); // Redirect to dashboard on success
+      const res = await loginUser(email, password);
+      localStorage.setItem('userToken', res.token);
+      localStorage.setItem('userId', String(res.user_id));
+      navigate('/dashboard'); 
     } catch (err) {
-      setMessage('Login failed. Please check credentials.');
+      const apiError = err.response?.data?.error || 'Login failed. Please check credentials.';
+      setMessage(apiError);
     }
   };
 

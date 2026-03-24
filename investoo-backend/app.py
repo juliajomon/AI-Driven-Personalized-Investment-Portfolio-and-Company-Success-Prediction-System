@@ -16,10 +16,17 @@ import io
 import re
 import atexit
 from datetime import datetime
+import json
+from database.portfolio_repository import save_portfolio, get_saved_portfolios
+from database.search_repository import save_search, get_search_history
+from database.users_repository import create_user, authenticate_user
+from routes.decision_chat import decision_chat_bp
 
-# --- CONFIGURATION ---
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type", "Authorization"]}})
+
+# Register Blueprint for decision chat
+app.register_blueprint(decision_chat_bp, url_prefix='')
 
 SHEET_ID = "1aGdGywmxsmFlXcaF9Th0TM4BOsT7A9LFoRCQyMzE0Ew"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
@@ -28,22 +35,14 @@ MODEL_FILE = 'company_success_ensemble_model.pkl'
 DATA_FILE = 'nifty_200_cleaned_for_ml.csv'
 PREDICTIONS_FILE = 'nifty_200_final_predictions.csv'
 
-# --- GLOBAL STATE ---
 model = None
 df_preds = None
-
-# ==========================================
-# 1. CORE LOGIC: DATA & ML ENGINE
-# ==========================================
 
 def get_clean_ticker(raw_name):
     if pd.isna(raw_name) or str(raw_name).strip() == "": return None
     
-    # 1. SUPER STRIP: Lowercase, remove ALL non-alphanumeric chars
-    # "Reliance Industr." -> "relianceindustr"
     cleaned_key = re.sub(r'[^a-z0-9]', '', str(raw_name).lower())
 
-    # 2. SKIP LIST (Strictly for Unlisted/Private Companies)
     skip_keys = [
         "tatacapital", "lenskart", "lgelectronics", "vishalmegamart", 
         "knowledgerealty", "hexaware", "smartworks", "swiggy", 
@@ -53,15 +52,10 @@ def get_clean_ticker(raw_name):
     for k in skip_keys:
         if k in cleaned_key: return "SKIP"
 
-    # 3. MASTER MAPPING DICTIONARY (The Complete List)
     mapping = {
 
-        "motiloswalfin": "MOTILALOFS.NS",  # Fix for Motilal Oswal
-        "lindeindia": "LINDEINDIA.NS",    # Fix for Linde India
-        "linde": "LINDEINDIA.NS",
-        "balkrishnainds": "BALKRISIND.NS",  # Fix for Balkrishna Industries
-        "supremeinds": "SUPREMEIND.NS",
-        # --- GIANTS (The ones failing right now) ---
+        "motiloswalfin": "MOTILALOFS.NS",  "lindeindia": "LINDEINDIA.NS",    "linde": "LINDEINDIA.NS",
+        "balkrishnainds": "BALKRISIND.NS",  "supremeinds": "SUPREMEIND.NS",
         "relianceindustr": "RELIANCE.NS",
         "infosys": "INFY.NS",
         "tcs": "TCS.NS",
@@ -76,7 +70,6 @@ def get_clean_ticker(raw_name):
         "larsentoubro": "LT.NS",
         "mm": "M&M.NS", "mahindramahindra": "M&M.NS",
         
-        # --- BANKS & FINANCE ---
         "hdfcbank": "HDFCBANK.NS",
         "icicibank": "ICICIBANK.NS",
         "axisbank": "AXISBANK.NS",
@@ -112,7 +105,6 @@ def get_clean_ticker(raw_name):
         "bankofmaha": "MAHABANK.NS",
         "authuminvest": "AIIL.NS", "authum": "AUTHUM.NS",
 
-        # --- AUTO & ENGINEERING ---
         "marutisuzuki": "MARUTI.NS",
         "tatamotors": "TATAMOTORS.NS",
         "bajajauto": "BAJAJ-AUTO.NS",
@@ -139,7 +131,6 @@ def get_clean_ticker(raw_name):
         "persistentsystems": "PERSISTENT.NS",
         "tataomm": "TATACOMM.NS",
 
-        # --- ENERGY & MATERIALS ---
         "ntpc": "NTPC.NS",
         "powergridcorpn": "POWERGRID.NS",
         "coalindia": "COALINDIA.NS",
@@ -186,7 +177,6 @@ def get_clean_ticker(raw_name):
         "aplapollotubes": "APLAPOLLO.NS",
         "sail": "SAIL.NS", "nmdc": "NMDC.NS",
 
-        # --- PHARMA & CONSUMER ---
         "drreddyslabs": "DRREDDY.NS",
         "cipla": "CIPLA.NS",
         "divislab": "DIVISLAB.NS",
@@ -246,12 +236,10 @@ def get_clean_ticker(raw_name):
     
     if cleaned_key in mapping: return mapping[cleaned_key]
     
-    # Partial Match Fallback
     for key, val in mapping.items():
         if key in cleaned_key or cleaned_key in key:
             if len(key) > 3: return val
             
-    # Auto-Clean Fallback (Last Resort)
     clean = re.sub(r'[^a-zA-Z0-9]', '', str(raw_name)).upper().replace("LTD","").replace("INDIA","")
     return f"{clean}.NS"
 
@@ -260,12 +248,7 @@ def safe_loc(df, key, default=pd.Series(dtype='float64')):
     try: return df.loc[key] if key in df.index else default
     except: return default
 
-
 def regularize_cov(matrix, eps=1e-8):
-    """
-    Ensure the covariance matrix is positive definite by adding
-    a small multiple of the identity if needed.
-    """
     mat = np.array(matrix, dtype=float)
     if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
         raise ValueError("Covariance matrix must be square.")
@@ -346,23 +329,17 @@ def fetch_hybrid_data(row):
     return kpis
 
 def perform_full_update(force=False):
-    """
-    The Master Function: Downloads, Cleans, Trains AI, Saves Files.
-    Runs only if it is Monday 8 AM, UNLESS force=True.
-    """
     now = datetime.now()
     
     if not force:
-        # Monday is 0, 8 is 8 AM
         if now.weekday() != 0 or now.hour != 8:
-            print(f"⏳ Skipping scheduled update. Time: {now}. Next run: Monday 8 AM.")
+            print(f" Skipping scheduled update. Time: {now}. Next run: Monday 8 AM.")
             return
 
-    print("\n⚙️  PERFORMING SYSTEM UPDATE (This takes 2-3 mins)...")
+    print("\n PERFORMING SYSTEM UPDATE (This takes 2-3 mins)...")
     try:
         global df_preds, model
         
-        # 1. FETCH
         print("   ⬇️  Downloading Market Data...")
         response = requests.get(CSV_URL)
         df_sheet = pd.read_csv(io.BytesIO(response.content))
@@ -379,7 +356,6 @@ def perform_full_update(force=False):
         df_new = pd.DataFrame(new_data)
         df_new = df_new.replace([np.inf, -np.inf], np.nan)
         
-        # 2. CLEAN
         print("   🧹 Cleaning Data...")
         numeric_cols = df_new.select_dtypes(include=[np.number]).columns
         
@@ -390,8 +366,7 @@ def perform_full_update(force=False):
         df_new[numeric_cols] = imputer.fit_transform(df_new[numeric_cols])
         df_new = df_new.fillna(0)
         
-        # 3. TRAIN AI
-        print("   🧠 Training AI Model...")
+        print("  Training AI Model...")
         feature_cols = [
             'Market_Cap', 'Revenue_CAGR_5Y', 'Net_Profit_Margin_5Y_Avg', 'ROE', 
             'Debt_to_Equity', 'Current_Ratio', 'Trailing_PE', 'Altman_Z_Score', 
@@ -404,7 +379,6 @@ def perform_full_update(force=False):
             if col not in df_new.columns: df_new[col] = 0.0
             
         X = df_new[feature_cols]
-        # Create synthetic target for training
         y = ((df_new['ROE'] > 12) & (df_new['Altman_Z_Score'] > 1.8)).astype(int)
         
         if y.sum() < 5: # Fallback if not enough "Success" rows
@@ -417,25 +391,22 @@ def perform_full_update(force=False):
         ensemble.fit(X, y)
         model = ensemble 
         
-        # 4. PREDICT
         probs = ensemble.predict_proba(X)[:, 1]
         df_new['AI_Success_Probability'] = (probs * 100).round(2)
         df_new['AI_Recommendation'] = df_new['AI_Success_Probability'].apply(
             lambda x: "Strong Buy" if x >= 80 else "Buy" if x >= 60 else "Hold" if x >= 40 else "Avoid"
         )
 
-        # 5. SAVE
-        print("   💾 Saving Files Locally...")
+        print("   Saving Files Locally...")
         df_new.to_csv(DATA_FILE, index=False)
         df_new.to_csv(PREDICTIONS_FILE, index=False)
         joblib.dump(ensemble, MODEL_FILE)
         
-        # 6. UPDATE RAM
         df_preds = df_new
-        print("✅ UPDATE COMPLETE & LOADED.")
+        print(" UPDATE COMPLETE & LOADED.")
         
     except Exception as e:
-        print(f"❌ Update Failed: {e}")
+        print(f" Update Failed: {e}")
 
 @app.route('/', methods=['GET'])
 def home(): return jsonify({"status": "online"})
@@ -445,23 +416,60 @@ def get_stocks():
     if df_preds is None: return jsonify({"error": "Data not ready"}), 500
     return jsonify(df_preds.head(50).to_dict(orient='records'))
 
+
+@app.route('/api/signup', methods=['POST'])
+def signup():
+    try:
+        data = request.json or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+
+        if not email or not password:
+            return jsonify({"error": "Email and password are required"}), 400
+
+        user_id = create_user(email, password)
+        # simple token placeholder (frontend only uses presence)
+        return jsonify({"user_id": user_id, "token": f"user-{user_id}"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.json or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+
+        if not email or not password:
+            return jsonify({"error": "Email and password are required"}), 400
+
+        user_id = authenticate_user(email, password)
+        if not user_id:
+            return jsonify({"error": "Invalid credentials"}), 401
+
+        return jsonify({"user_id": user_id, "token": f"user-{user_id}"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/optimize', methods=['POST'])
 def optimize_portfolio():
     try:
         data = request.json or {}
         investment_amount = float(data.get('amount', 100000))
         target_return_pct = float(data.get('target_return', 20)) / 100.0 
+        user_id = data.get('user_id')
+        if user_id is None:
+            return jsonify({"error": "user_id is required"}), 400
         
         if df_preds is None: return jsonify({"error": "Server data missing/loading."}), 500
 
-        # Filter Candidates (Limit to top 15 Strong Buys)
         candidates = df_preds[df_preds['AI_Success_Probability'] > 80].copy()
         candidates = candidates.sort_values(by='AI_Success_Probability', ascending=False).head(15)
         tickers = candidates['Ticker'].tolist()
         
         if len(tickers) < 2: return jsonify({"error": "Not enough strong buy stocks."}), 400
 
-        # Fetch Closing Prices
         prices = yf.download(tickers, period="1y", progress=False, threads=False)['Close']
         prices = prices.dropna(axis=1, thresh=int(len(prices)*0.9)).fillna(method='ffill').fillna(method='bfill')
         valid_tickers = prices.columns.tolist()
@@ -473,7 +481,6 @@ def optimize_portfolio():
 
         if np.isnan(Sigma).any(): return jsonify({"error": "Unstable market data."}), 500
 
-        # --- 1. ATTEMPT PRIMARY (Target Return) OPTIMIZATION ---
         w_primary = cp.Variable(n)
         risk_primary = cp.quad_form(w_primary, Sigma)
         
@@ -485,11 +492,9 @@ def optimize_portfolio():
         prob_primary.solve(solver=cp.OSQP)
 
         
-        # --- 2. FALLBACK CHECK & GMVP SOLUTION ---
         is_gmvp_fallback = False
         if w_primary.value is None or prob_primary.status not in ["optimal", "optimal_inaccurate"]:
             
-            # If primary fails, solve for the Global Minimum Volatility Portfolio (GMVP)
             w_gmvp = cp.Variable(n)
             gmvp_constraints = [cp.sum(w_gmvp) == 1, w_gmvp >= 0, w_gmvp <= 0.30]
             prob_gmvp = cp.Problem(cp.Minimize(cp.quad_form(w_gmvp, Sigma)), gmvp_constraints)
@@ -502,44 +507,51 @@ def optimize_portfolio():
         else:
             weights = w_primary.value
 
-        # --- 3. CALCULATE FINAL METRICS ---
         final_exp_return = float(np.dot(weights, mu))
-        final_risk = float(np.sqrt(np.dot(weights.T, np.dot(Sigma, weights))))
+        final_risk = float(np.sqrt(np.dot(Sigma @ weights, weights)))
         final_sharpe = final_exp_return / final_risk
 
-        # --- 4. DETERMINE FINAL STATUS AND ADVICE ---
-        
+        allocation = []
+        for i, t in enumerate(valid_tickers):
+            weight = float(weights[i])
+            if weight > 0.01:
+                meta = candidates[candidates['Ticker'] == t]
+                name = meta['Name'].values[0] if not meta.empty else t
+                sector = meta['Sector'].values[0] if not meta.empty else "Unknown"
+
+                allocation.append({
+                    "ticker": t,
+                    "name": name,
+                    "sector": sector,
+                    "weight": round(weight, 4),
+                    "value": round(weight * investment_amount, 2)
+                })
+
+        # persist this search in search_history (all runs)
+        try:
+            portfolio_json = json.dumps(allocation)
+            save_search(
+                user_id=int(user_id) if user_id is not None else 1,
+                amount=float(investment_amount),
+                risk_rate=float(final_risk * 100.0),
+                expected_return=float(final_exp_return * 100.0),
+                portfolio_json=portfolio_json,
+            )
+        except Exception as e:
+            print(f" Search history save error: {e}")
+
         warning_level = "SUCCESS"
         warning_message = f"Optimal solution found. Target achieved ({final_exp_return*100:.1f}%) with high efficiency (Sharpe: {final_sharpe:.2f})."
         
-        # Check 1: Is the portfolio highly inefficient (Sharpe < 1.05)?
         if final_exp_return > 0.05 and final_sharpe < 1.05:
             warning_level = "ADJUST"
             
             if is_gmvp_fallback:
-                # FIX: If already at GMVP, tell user to INCREASE target
                 warning_message = f"HIGH RISK WARNING: Volatility ({final_risk*100:.1f}%) is high for your return. Sharpe Ratio ({final_sharpe:.2f}) is below the efficiency standard (1.25). Lower your target return to reduce risk."
 
             else:
                 warning_message = f"WARNING: Portfolio is at minimum risk (GMVP). Sharpe ({final_sharpe:.2f}) is low. Increase your target return to improve efficiency."
        
-        
-        # --- 5. FORMAT FINAL OUTPUT ---
-        
-        allocation = []
-        for i, t in enumerate(valid_tickers):
-            weight = weights[i]
-            if weight > 0.01:
-                meta = candidates[candidates['Ticker'] == t]
-                name = meta['Name'].values[0] if not meta.empty else t
-                sector = meta['Sector'].values[0] if not meta.empty else "Unknown"
-                
-                allocation.append({
-                    "ticker": t, "name": name, "sector": sector,
-                    "weight": round(weight, 4),
-                    "value": round(weight * investment_amount, 2)
-                })
-        
         return jsonify({
             "status": warning_level,
             "message": warning_message,
@@ -552,36 +564,101 @@ def optimize_portfolio():
         })
 
     except Exception as e:
-        print(f"❌ Server Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500# ==========================================
-# 5. STARTUP (With Self-Healing)
-# ==========================================
-if __name__ == '__main__':
-    print("🚀 Server Starting...")
-    
-    # 1. START SCHEDULER
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=perform_full_update, trigger="cron", day_of_week='mon', hour=8)
-    scheduler.start()
-    atexit.register(lambda: scheduler.shutdown())
+        print(f" Server Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+@app.route('/api/save-portfolio', methods=['POST'])
+def save_portfolio_route():
+    try:
+        data = request.get_json(silent=True) or {}
 
-    # 2. CHECK ARTIFACTS
+        # accept both snake_case and camelCase from frontend
+        user_id = data.get('user_id', None)
+        if user_id is None:
+            user_id = data.get('userId', None)
+
+        amount = data.get('amount', None)
+
+        risk_rate = data.get('risk_rate', None)
+        if risk_rate is None:
+            risk_rate = data.get('riskRate', None)
+
+        expected_return = data.get('expected_return', None)
+        if expected_return is None:
+            expected_return = data.get('expectedReturn', None)
+
+        portfolio = data.get('portfolio') or []
+
+        missing = []
+        if user_id is None:
+            missing.append("user_id")
+        if amount is None:
+            missing.append("amount")
+        if expected_return is None:
+            missing.append("expected_return")
+
+        if missing:
+            return jsonify(
+                {
+                    "error": "Missing required fields",
+                    "missing": missing,
+                    "received_keys": list(data.keys()),
+                }
+            ), 400
+
+        portfolio_id = save_portfolio(
+            int(user_id),
+            float(amount),
+            float(risk_rate) if risk_rate is not None else None,
+            float(expected_return),
+            json.dumps(portfolio),
+        )
+
+        return jsonify({"id": portfolio_id}), 201
+
+    except Exception as e:
+        print("SAVE ERROR:", e)
+        return jsonify({"error": str(e)}), 500
+@app.route('/api/search-history', methods=['GET'])
+def get_search_history_route():
+    try:
+        user_id = request.args.get('user_id', default=1, type=int)
+        history = get_search_history(user_id)
+        return jsonify(history)
+    except Exception as e:
+        print(f" Get search history error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/saved-portfolios', methods=['GET'])
+def get_saved_portfolios_route():
+    try:
+        user_id = request.args.get('user_id', type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id is required"}), 400
+        portfolios = get_saved_portfolios(user_id=user_id)
+        return jsonify(portfolios)
+    except Exception as e:
+        print(f" Get saved portfolios error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+# 5. STARTUP (With Self-Healing)
+if __name__ == "__main__":
+    print(" Server Starting...")
+
     try:
         if os.path.exists(PREDICTIONS_FILE) and os.path.exists(MODEL_FILE):
-            print("✅ Found existing data. Loading...")
+            print(" Found existing data. Loading...")
             model = joblib.load(MODEL_FILE)
             df_preds = pd.read_csv(PREDICTIONS_FILE)
             print(f"   - Loaded {len(df_preds)} stocks.")
         else:
-            # If files are missing, run the update immediately
-            print("\n⚠️  Data files missing. Running INITIAL SETUP (This takes ~2 mins)...")
+            print("\n  Data files missing. Running INITIAL SETUP (This takes ~2 mins)...")
             perform_full_update(force=True)
-            
+
     except Exception as e:
-        # If loading fails (version mismatch/corruption), force update
-        print(f"\n❌ Critical Artifact Error ({e}). Running REBUILD...")
+        print(f"\n Critical Artifact Error ({e}). Running REBUILD...")
         perform_full_update(force=True)
 
-    # 3. START FLASK
-    print(f"\n🌐 Serving on http://127.0.0.1:5000")
+    print(f"\n Serving on http://127.0.0.1:5000")
     app.run(debug=True, port=5000, use_reloader=False)

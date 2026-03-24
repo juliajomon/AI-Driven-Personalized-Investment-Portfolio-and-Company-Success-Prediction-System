@@ -2,19 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import '../styles/dashboard.css';
-import { optimizePortfolio } from '../api/apiService';
+import { optimizePortfolio, saveOptimizedPortfolio } from '../api/apiService';
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF', '#FF4560', '#775DD0'];
 
 const DashboardPage = () => {
-  const [amount, setAmount] = useState(); // Default investment amount
-  const [targetReturn, setTargetReturn] = useState(); // Default target return
+  const [amount, setAmount] = useState();
+  const [targetReturn, setTargetReturn] = useState();
   const [portfolioData, setPortfolioData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('Enter your goals and optimize the portfolio!');
+  const [saving, setSaving] = useState(false);
   const navigate = useNavigate();
 
-  // Redirect if not logged in (basic guard)
   useEffect(() => {
     if (!localStorage.getItem('userToken')) {
       navigate('/login');
@@ -27,12 +27,13 @@ const DashboardPage = () => {
     setPortfolioData(null);
 
     try {
-      const response = await optimizePortfolio(Number(amount), Number(targetReturn));
+      const userId = localStorage.getItem('userId') || 1;
+      const response = await optimizePortfolio(Number(amount), Number(targetReturn), userId);
       setMessage(response.message);
       setPortfolioData(response);
     } catch (err) {
       const apiError = err.response?.data?.error || err.message || 'Optimization failed due to an internal server error.';
-      setMessage(`❌ ERROR: ${apiError}`);
+      setMessage(`ERROR: ${apiError}`);
     } finally {
       setLoading(false);
     }
@@ -40,7 +41,29 @@ const DashboardPage = () => {
 
   const logout = () => {
     localStorage.removeItem('userToken');
+    localStorage.removeItem('userId');
     navigate('/login');
+  };
+
+  const handleSave = async () => {
+    if (!portfolioData) return;
+    try {
+      setSaving(true);
+      const userId = localStorage.getItem('userId') || 1; // adjust once you wire real auth IDs
+      await saveOptimizedPortfolio({
+        userId,
+        amount: Number(amount),
+        riskRate: portfolioData.metrics.estimated_risk,
+        expectedReturn: portfolioData.metrics.expected_return,
+        portfolio: portfolioData.portfolio,
+      });
+      setMessage('Portfolio saved successfully.');
+    } catch (err) {
+      const apiError = err.response?.data?.error || err.message || 'Failed to save portfolio.';
+      setMessage(`ERROR: ${apiError}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -59,12 +82,19 @@ const DashboardPage = () => {
         </div>
 
         <div className="category-buttons">
-          <button type="button" className="dashboard-button selected">
-            Portfolio Optimizer
+          <button
+            type="button"
+            className="dashboard-button"
+            onClick={() => navigate('/saved-portfolios')}
+          >
+            Saved Portfolio
           </button>
-          <button type="button" className="dashboard-button" onClick={() => navigate('/history')}>
+          <button
+            type="button"
+            className="dashboard-button"
+            onClick={() => navigate('/history')}
+          >
             Optimization History
-
           </button>
         </div>
 
@@ -176,6 +206,15 @@ const DashboardPage = () => {
                   </tbody>
                 </table>
               </div>
+              <button
+                type="button"
+                className="optimize-btn"
+                onClick={handleSave}
+                disabled={saving}
+                style={{ marginTop: '1rem' }}
+              >
+                {saving ? 'Saving...' : 'Save Portfolio'}
+              </button>
             </div>
           </div>
         ) : (

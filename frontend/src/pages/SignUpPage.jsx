@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../styles/auth.css';
+import { signupUser } from '../api/apiService';
 
 const SignupPage = () => {
   const [email, setEmail] = useState('');
@@ -8,15 +9,18 @@ const SignupPage = () => {
   const [message, setMessage] = useState('');
   const navigate = useNavigate();
 
-  const handleSignup = (e) => {
+  const handleSignup = async (e) => {
     e.preventDefault();
-    setMessage('Registration successful! Redirecting to login...');
-
-    // In a real app, you would send data to Flask /api/auth/signup
-
-    setTimeout(() => {
-      navigate('/login');
-    }, 1500);
+    try {
+      await signupUser(email, password);
+      setMessage('Registration successful! Redirecting to login...');
+      setTimeout(() => {
+        navigate('/login');
+      }, 1500);
+    } catch (err) {
+      const apiError = err.response?.data?.error || 'Registration failed.';
+      setMessage(apiError);
+    }
   };
 
   return (
